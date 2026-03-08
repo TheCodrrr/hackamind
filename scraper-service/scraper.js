@@ -61,6 +61,7 @@ const INTERVAL = parseInt(process.env.SCRAPE_INTERVAL || "300", 10) * 1000;
 const RATE_LIMIT = parseInt(process.env.RATE_LIMIT_MS || "800", 10);
 const CHANNEL = "layer1.jobs";
 const CONFIG_CHANNEL = "scraper.config";
+const SEEN_KEY = "scraper:seen_ids"; // Redis set of known job_ids
 
 // Current dynamic job age filter (days, 0 = no filter)
 let currentJobAge = 30;
@@ -301,6 +302,14 @@ const USER_AGENTS = [
 
 function randomUA() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+}
+
+// Strip Naukri rating/review suffix from company names
+// e.g. "Barclays3.81156 Reviews" → "Barclays", "JPMorgan Chase Bank3.87691 Reviews" → "JPMorgan Chase Bank"
+function cleanCompany(raw) {
+  if (!raw) return "Unknown";
+  // The rating digit can be glued right onto the company name (no space)
+  return raw.replace(/\d[\d.]*\s*Reviews?.*$/i, "").replace(/\s+$/, "").trim() || raw;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -588,37 +597,24 @@ async function scrapeDetailPage(page, jobUrl, fallbackCity) {
   return detail;
 }
 
-// ── Build a normalized record from card + optional detail page data ───
-async function buildRecord(page, card, fallbackCity) {
-  let detail = null;
+// ── Build a normalized record from card data (no detail page visit) ───
+function buildRecord(card, fallbackCity) {
+  const title = card.title || "Untitled";
+  const company = cleanCompany(card.company || "Unknown");
+  const rawLocation = card.city || "";
+  const postedRaw = card.posted_raw || "";
+  const description = card.description || "";
 
-  // If we have a detail URL, try visiting it for richer data
-  if (card.url && card.url.includes("naukri.com")) {
-    try {
-      detail = await scrapeDetailPage(page, card.url, fallbackCity);
-    } catch (err) {
-      console.warn(`[scraper] detail page failed for ${card.url.slice(-50)}: ${err.message}`);
-    }
-  }
-
-  // Prefer detail-page values, fall back to card-level values
-  const title = (detail && detail.title) || card.title || "Untitled";
-  const company = (detail && detail.company) || card.company || "Unknown";
-  const rawLocation = (detail && detail.location) || card.city || "";
-  const postedRaw = (detail && detail.posted) || card.posted_raw || "";
-  const description = (detail && detail.description) || card.description || "";
-  const canonicalUrl = (detail && detail.canonicalUrl) || card.url || "";
-
-  // Skills: prefer detail, then card tags, then extract from description
-  let skills = (detail && detail.skills && detail.skills.length > 0) ? detail.skills : [];
-  if (skills.length === 0 && card.skills_raw && card.skills_raw.length > 0) {
+  // Skills: card tags first, then extract from description
+  let skills = [];
+  if (card.skills_raw && card.skills_raw.length > 0) {
     skills = card.skills_raw.map((s) => s.toLowerCase());
   }
   if (skills.length === 0) {
     skills = extractSkills(description);
   }
 
-  const jobId = extractJobId(canonicalUrl || card.url);
+  const jobId = extractJobId(card.url);
   const loc = normalizeLocation(rawLocation, fallbackCity);
   if (!loc) return null; // city outside canonical 43 — skip
 
@@ -637,82 +633,7 @@ async function buildRecord(page, card, fallbackCity) {
     scrape_timestamp: new Date().toISOString(),
   };
 
-  // ── Suspect / generic title handling: extract better data from page ──
-  if (record.title === "Custom Software Engineer" || record.title === "Untitled" || !record.title) {
-    console.warn(`[scraper] ⚠ suspect: title="${record.title}" company="${record.company}" url=${card.url}`);
-
-    let inferredType = detectTypeFromText(record.title);
-    if (inferredType === "unknown") inferredType = detectTypeFromText(record.company);
-    if (inferredType === "unknown" && detail) inferredType = detectTypeFromText(JSON.stringify(detail));
-
-    // Re-fetch page for deeper extraction if detail is missing or type unknown
-    if ((detail === null || inferredType === "unknown") && card.url) {
-      try {
-        await page.goto(card.url, { waitUntil: "networkidle2", timeout: 20000 });
-
-        const debugInfo = await page.evaluate(() => {
-          const h = Array.from(document.querySelectorAll("h1,h2,h3")).slice(0, 10).map(e => e.textContent.trim());
-          const compCandidates = Array.from(document.querySelectorAll('a[class*="comp"], a[href*="/company/"], .company, .cmp_name, .top-sec .company')).slice(0, 8).map(e => e.textContent.trim());
-          const labelChips = Array.from(document.querySelectorAll('span, div, button')).filter(e => /intern|full|part|contract|temporary/i.test(e.textContent)).slice(0, 12).map(e => e.textContent.trim());
-          const jsonLd = Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s => s.textContent).slice(0, 6);
-          const metas = Array.from(document.querySelectorAll('meta[name], meta[property]')).map(m => ({ name: m.getAttribute('name') || m.getAttribute('property'), content: m.getAttribute('content') }));
-          const bodySnip = document.body ? document.body.innerText.slice(0, 10000) : "";
-          return { h, compCandidates, labelChips, jsonLd, metas, bodySnip };
-        });
-
-        console.warn(`[scraper]   debug h1/h2/h3: ${JSON.stringify(debugInfo.h.slice(0, 5))}`);
-        console.warn(`[scraper]   debug company candidates: ${JSON.stringify(debugInfo.compCandidates.slice(0, 5))}`);
-        console.warn(`[scraper]   debug label chips: ${JSON.stringify(debugInfo.labelChips.slice(0, 8))}`);
-
-        // Parse JSON-LD for jobTitle / employmentType
-        let pageJobTitle = null;
-        let pageEmploymentType = null;
-        let pageCompany = null;
-        for (const s of debugInfo.jsonLd) {
-          try {
-            const obj = JSON.parse(s);
-            if (typeof obj === "object") {
-              if (!pageJobTitle && (obj.title || obj.jobTitle)) pageJobTitle = obj.title || obj.jobTitle;
-              if (!pageEmploymentType && obj.employmentType) pageEmploymentType = obj.employmentType;
-              if (!pageCompany && obj.hiringOrganization && obj.hiringOrganization.name) pageCompany = obj.hiringOrganization.name;
-            }
-          } catch (_) { /* ignore parse errors */ }
-        }
-
-        // Infer type from strongest signals
-        const candidates = [
-          pageEmploymentType, pageJobTitle,
-          debugInfo.labelChips.join(" "),
-          debugInfo.h.join(" "),
-          debugInfo.compCandidates.join(" "),
-          debugInfo.bodySnip,
-        ].filter(Boolean).join(" ");
-        const inferredFromPage = detectTypeFromText(candidates);
-        inferredType = pageEmploymentType ? detectTypeFromText(pageEmploymentType) : inferredFromPage;
-        if (inferredType === "unknown") inferredType = detectTypeFromText(record.title);
-
-        // Override title if we found a better one from JSON-LD or headings
-        let betterTitle = pageJobTitle || debugInfo.h.find(t => t && t.length > 3 && t.length < 120 && !/apply|login|sign/i.test(t)) || null;
-        if (betterTitle) {
-          console.warn(`[scraper]   override title -> ${betterTitle}`);
-          record.title = betterTitle;
-        }
-
-        // Override company if found
-        if (pageCompany && (record.company === "Unknown" || !record.company)) {
-          record.company = pageCompany;
-        }
-
-        console.warn(`[scraper]   inferredType=${inferredType} json-ld title=${pageJobTitle || "n/a"} employmentType=${pageEmploymentType || "n/a"}`);
-      } catch (err) {
-        console.warn(`[scraper] debug fetch failed for ${card.url} -> ${err.message}`);
-      }
-    }
-    record.inferredType = inferredType;
-  } else {
-    record.inferredType = detectTypeFromText(record.title);
-  }
-
+  record.inferredType = detectTypeFromText(record.title);
   return record;
 }
 
@@ -720,9 +641,10 @@ async function buildRecord(page, card, fallbackCity) {
 async function scrapeCycle(browser, redis) {
   const cities = getCities();
   const queries = getQueries();
-  const seenIds = new Set(); // global dedup by job_id
-  const seenTitleCompany = new Set(); // dedup by title+company to avoid repeated promoted listings
+  const seenIds = new Set(); // in-memory dedup for this cycle
+  const seenTitleCompany = new Set();
   let totalPublished = 0;
+  let totalSkipped = 0;
 
   // Titles to always skip (known promoted / generic / placeholder)
   const SKIP_TITLES = new Set([
@@ -753,40 +675,48 @@ async function scrapeCycle(browser, redis) {
 
             for (const card of cards) {
               try {
-                // Early skip: filter out known generic/promoted cards BEFORE expensive buildRecord
-                if (SKIP_TITLES.has(norm(card.title))) {
-                  continue;
-                }
-                if (card.url && SKIP_URL_PATTERNS.some((p) => p.test(card.url))) {
+                // Early skip: filter out known generic/promoted cards
+                if (SKIP_TITLES.has(norm(card.title))) continue;
+                if (card.url && SKIP_URL_PATTERNS.some((p) => p.test(card.url))) continue;
+
+                // Extract job_id early from the URL to check Redis BEFORE detail page
+                const earlyJobId = extractJobId(card.url);
+
+                // In-cycle dedup
+                if (seenIds.has(earlyJobId)) { totalSkipped++; continue; }
+
+                // Check Redis for already-processed jobs — skip detail page visit
+                const alreadySeen = await redis.sismember(SEEN_KEY, earlyJobId);
+                if (alreadySeen) {
+                  seenIds.add(earlyJobId);
+                  totalSkipped++;
                   continue;
                 }
 
-                const record = await buildRecord(page, card, city);
+                const record = buildRecord(card, city);
                 if (!record) continue; // city outside canonical list
 
-                // Skip known generic / promoted titles (post-build, in case detail page changed title)
-                if (SKIP_TITLES.has(norm(record.title))) {
-                  console.log(`[scraper] skip generic: "${record.title}" @ ${record.company}`);
-                  continue;
-                }
+                if (SKIP_TITLES.has(norm(record.title))) continue;
 
-                // Dedup by job_id
-                if (seenIds.has(record.job_id)) continue;
                 seenIds.add(record.job_id);
 
                 // Dedup by title+company (skip repeated promoted listings)
                 const titleCompanyKey = norm(record.title) + "|||" + norm(record.company);
                 if (seenTitleCompany.has(titleCompanyKey)) {
                   console.log(`[scraper] skip dup title+company: "${record.title}" @ ${record.company}`);
+                  totalSkipped++;
                   continue;
                 }
                 seenTitleCompany.add(titleCompanyKey);
+
+                // Mark as seen in Redis (expire after 7 days to rediscover eventually)
+                await redis.sadd(SEEN_KEY, record.job_id);
 
                 await redis.publish(CHANNEL, JSON.stringify(record));
                 totalPublished++;
                 cityCount++;
                 console.log(
-                  `[scraper] ✓ ${record.job_id} | ${record.title.slice(0, 50)} @ ${record.company.slice(0, 30)} | ${record.city}, ${record.state}`
+                  `[scraper] ✓ NEW ${record.job_id} | ${record.title.slice(0, 50)} @ ${record.company.slice(0, 30)} | ${record.city}, ${record.state}`
                 );
               } catch (err) {
                 console.error(`[scraper] record build error: ${err.message}`);
@@ -808,7 +738,7 @@ async function scrapeCycle(browser, redis) {
     }
   }
 
-  console.log(`[scraper] ── cycle done: published ${totalPublished} jobs across ${queries.length} categories × ${cities.length} cities ──`);
+  console.log(`[scraper] ── cycle done: ${totalPublished} NEW jobs published, ${totalSkipped} skipped (already seen) across ${queries.length} categories × ${cities.length} cities ──`);
   return totalPublished;
 }
 
@@ -863,9 +793,14 @@ async function main() {
 
   // First cycle immediately
   await scrapeCycle(browser, redis);
+  // Set TTL on the seen-ids set so jobs can be rediscovered after 7 days
+  await redis.expire(SEEN_KEY, 7 * 86400);
 
   // Subsequent cycles on interval
-  setInterval(() => scrapeCycle(browser, redis), INTERVAL);
+  setInterval(async () => {
+    await scrapeCycle(browser, redis);
+    await redis.expire(SEEN_KEY, 7 * 86400);
+  }, INTERVAL);
   console.log(`[scraper] next cycle in ${INTERVAL / 1000}s`);
 }
 

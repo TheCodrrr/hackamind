@@ -32,6 +32,33 @@ function ChatParticles({ count = 150 }) {
   );
 }
 
+/* ---------- Format message text ---------- */
+function formatMessage(text) {
+  if (!text) return text;
+  const lines = text.split('\n');
+  return lines.map((line, li) => {
+    // ### prefix → italic line
+    const isHeading = line.startsWith('###');
+    const lineContent = isHeading ? line.replace(/^###\s*/, '') : line;
+
+    // Split by **bold** markers
+    const parts = lineContent.split(/(\*\*[^*]+\*\*)/);
+    const rendered = parts.map((part, pi) => {
+      if (part.startsWith('**') && part.endsWith('**')) {
+        return <strong key={pi}>{part.slice(2, -2)}</strong>;
+      }
+      return <span key={pi}>{part}</span>;
+    });
+
+    return (
+      <span key={li}>
+        {isHeading ? <em>{rendered}</em> : rendered}
+        {li < lines.length - 1 && <br />}
+      </span>
+    );
+  });
+}
+
 const SUGGESTIONS = [
   'Which jobs are most at risk in Pune?',
   'What skills should I learn for AI readiness?',
@@ -207,7 +234,7 @@ export default function Chatbot() {
                   transition={{ duration: 0.35, type: 'spring', stiffness: 300, damping: 25 }}
                 >
                   {m.role === 'assistant' && <span className="chat-avatar"><span className="material-symbols-outlined">smart_toy</span></span>}
-                  <div className="chat-bubble__text">{m.text}</div>
+                  <div className="chat-bubble__text">{formatMessage(m.text)}</div>
                 </motion.div>
               ))}
               {loading && (
@@ -378,7 +405,7 @@ export default function Chatbot() {
                   {/* Plan Content */}
                   <div className="plan-content">
                     <h4><span className="material-symbols-outlined">route</span> Your Personalised Plan</h4>
-                    <div className="plan-content__text">{planData.plan}</div>
+                    <div className="plan-content__text">{formatMessage(planData.plan)}</div>
                   </div>
 
                   {/* Recommended Courses */}

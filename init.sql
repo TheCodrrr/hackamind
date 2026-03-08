@@ -1,7 +1,7 @@
 -- init.sql: bootstrap the jobmarket database
 -- Covers all tables needed by the Skills Mirage platform
 
--- ── Layer 1: Scraped jobs ────────────────────────────────────────────
+-- 1 ── Layer 1: Scraped jobs ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS jobs (
   job_id            TEXT PRIMARY KEY,
   job_url           TEXT,
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   scrape_timestamp  TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ── Aggregates (computed by processor) ───────────────────────────────
+-- 2 ── Aggregates (computed by processor) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS aggregates (
   id           SERIAL PRIMARY KEY,
   agg_type     TEXT NOT NULL,
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS aggregates (
   updated_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ── Skill mentions (trending / declining) ────────────────────────────
+-- 3 ── Skill mentions (trending / declining) ────────────────────────────
 CREATE TABLE IF NOT EXISTS skill_mentions (
   id                    SERIAL PRIMARY KEY,
   skill                 TEXT NOT NULL,
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS skill_mentions (
   snapshot_date         TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ── Vulnerability scores (role × city) ───────────────────────────────
+-- 4 ── Vulnerability scores (role × city) ───────────────────────────────
 CREATE TABLE IF NOT EXISTS vulnerability_scores (
   id                 SERIAL PRIMARY KEY,
   canonical_role     TEXT NOT NULL,
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS vulnerability_scores (
   snapshot_date      TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ── Watchlist alerts ─────────────────────────────────────────────────
+-- 5 ── Watchlist alerts ─────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS watchlist_alerts (
   id                        SERIAL PRIMARY KEY,
   canonical_role            TEXT NOT NULL,
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS watchlist_alerts (
   triggered_at              TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ── Courses (NPTEL / SWAYAM / PMKVY) ────────────────────────────────
+-- 6 ── Courses (NPTEL / SWAYAM / PMKVY) ────────────────────────────────
 CREATE TABLE IF NOT EXISTS courses (
   id              SERIAL PRIMARY KEY,
   name            TEXT NOT NULL,
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS courses (
   level           TEXT DEFAULT 'beginner' CHECK (level IN ('beginner','intermediate','advanced'))
 );
 
--- ── Worker profiles (Layer 2) ────────────────────────────────────────
+-- 7 ── Worker profiles (Layer 2) ────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS worker_profiles (
   id                  SERIAL PRIMARY KEY,
   job_title           TEXT NOT NULL,
@@ -119,7 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_canonical_role ON jobs(canonical_role);
 CREATE INDEX IF NOT EXISTS idx_jobs_posted ON jobs(posted_date);
 
--- ── Users ─────────────────────────────────────────────────────────────
+-- 8 ── Users ─────────────────────────────────────────────────────────────
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE IF NOT EXISTS users (
   id              SERIAL PRIMARY KEY,

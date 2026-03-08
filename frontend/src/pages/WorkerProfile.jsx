@@ -5,7 +5,7 @@ import { Float, Stars } from '@react-three/drei';
 import * as THREE from 'three';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
-import { submitWorkerProfile, getMLScore } from '../api';
+import { submitWorkerProfile, getMLScore, getDropdownJobTitles } from '../api';
 import './WorkerProfile.css';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -58,8 +58,8 @@ function TiltCard({ children, className }) {
   const ref = useRef(null);
   const x = useMotionValue(0);
   const y = useMotionValue(0);
-  const rotateX = useSpring(useTransform(y, [-0.5, 0.5], [8, -8]), { stiffness: 300, damping: 30 });
-  const rotateY = useSpring(useTransform(x, [-0.5, 0.5], [-8, 8]), { stiffness: 300, damping: 30 });
+  const rotateX = useSpring(useTransform(y, [-0.5, 0.5], [3, -3]), { stiffness: 200, damping: 40 });
+  const rotateY = useSpring(useTransform(x, [-0.5, 0.5], [-3, 3]), { stiffness: 200, damping: 40 });
   const handleMouse = useCallback((e) => {
     const rect = ref.current?.getBoundingClientRect();
     if (!rect) return;
@@ -88,6 +88,7 @@ export default function WorkerProfile() {
   const [mlScore, setMlScore] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [jobTitles, setJobTitles] = useState([]);
   const mouse = useRef([0, 0]);
   const pageRef = useRef(null);
   const { scrollYProgress } = useScroll();
@@ -97,6 +98,10 @@ export default function WorkerProfile() {
     const h = (e) => { mouse.current = [(e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1]; };
     window.addEventListener('mousemove', h);
     return () => window.removeEventListener('mousemove', h);
+  }, []);
+
+  useEffect(() => {
+    getDropdownJobTitles().then(res => setJobTitles(res.data)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -125,7 +130,22 @@ export default function WorkerProfile() {
         ...form,
         yearsOfExperience: Number(form.yearsOfExperience) || 0,
       });
-      setResult(res.data);
+      const raw = res.data;
+      // Map snake_case DB columns to camelCase and normalise structures
+      const skills = typeof raw.extracted_skills === 'string' ? JSON.parse(raw.extracted_skills) : raw.extracted_skills;
+      const reskill = typeof raw.reskilling_path === 'string' ? JSON.parse(raw.reskilling_path) : raw.reskilling_path;
+      const parsed = {
+        ...raw,
+        riskScore: raw.risk_score,
+        extractedSkills: skills,
+        signals: raw.top_signals,
+        reskillingPath: reskill ? {
+          targetRole: reskill.targetRole,
+          courses: (reskill.steps || []).map(s => ({ platform: s.institution, name: s.courseName })),
+          estimatedWeeks: reskill.totalWeeks,
+        } : null,
+      };
+      setResult(parsed);
 
       // Also fetch ML score from the scoring service
       try {
@@ -177,12 +197,10 @@ export default function WorkerProfile() {
             <form onSubmit={handleSubmit}>
               <div className="form-group">
                 <label>Job Title / Role *</label>
-                <input
-                  name="jobTitle"
-                  value={form.jobTitle}
-                  onChange={handleChange}
-                  placeholder="e.g. Data Entry Operator, BPO Agent"
-                />
+                <select name="jobTitle" value={form.jobTitle} onChange={handleChange}>
+                  <option value="">Select job title</option>
+                  {jobTitles.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
               </div>
 
               <div className="form-group">
@@ -242,7 +260,6 @@ export default function WorkerProfile() {
                 transition={{ duration: 0.6, ease: [0.25, 0.46, 0.45, 0.94] }}
               >
                 <RiskGauge score={result.riskScore} />
-
                 {/* ML Model Score */}
                 {mlScore && (
                   <motion.div
@@ -281,78 +298,6 @@ export default function WorkerProfile() {
                     {mlScore.confidence_std != null && (
                       <p style={{ fontSize: '0.8rem', opacity: 0.5, marginTop: 8 }}>
                         Confidence ±{mlScore.confidence_std}
-                      </p>
-                    )}
-                  </motion.div>
-                )}
-
-                {/* Extracted Skills */}
-                {result.extractedSkills && (
-                  <motion.div
-                    className="result-card glass"
-                    initial={{ opacity: 0, y: 30 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.2, duration: 0.5 }}
-                  >
-                    <h3>Detected Skills</h3>
-                    <SkillTags label="Technical" items={result.extractedSkills.explicit} color="var(--blue)" />
-                    <SkillTags label="Implicit" items={result.extractedSkills.implicit} color="var(--purple)" />
-                    <SkillTags label="Soft Skills" items={result.extractedSkills.soft} color="var(--cyan)" />
-                    <SkillTags label="AI Readiness" items={result.extractedSkills.aiReadiness} color="var(--green)" />
-                    {result.extractedSkills.aspirations?.length > 0 && (
-                      <SkillTags label="Aspirations" items={result.extractedSkills.aspirations} color="var(--yellow)" />
-                    )}
-                  </motion.div>
-                )}
-
-                {/* Risk Signals */}
-                {result.signals && result.signals.length > 0 && (
-                  <motion.div
-                    className="result-card glass"
-                    initial={{ opacity: 0, y: 30 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.4, duration: 0.5 }}
-                  >
-                    <h3>Risk Signals</h3>
-                    <ul className="signals-list">
-                      {result.signals.map((s, i) => <motion.li key={i} initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.5 + i * 0.08 }}>{s}</motion.li>)}
-                    </ul>
-                  </motion.div>
-                )}
-
-                {/* Reskilling Path */}
-                {result.reskillingPath && (
-                  <motion.div
-                    className="result-card glass reskilling-card"
-                    initial={{ opacity: 0, y: 30 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.6, duration: 0.5 }}
-                  >
-                    <h3>Reskilling Pathway</h3>
-                    {result.reskillingPath.targetRole && (
-                      <p className="reskilling-target">
-                        Target Role: <strong>{result.reskillingPath.targetRole}</strong>
-                      </p>
-                    )}
-                    {result.reskillingPath.courses?.length > 0 && (
-                      <div className="course-list">
-                        {result.reskillingPath.courses.map((c, i) => (
-                          <motion.div
-                            key={i}
-                            className="course-item"
-                            initial={{ opacity: 0, x: -20 }}
-                            animate={{ opacity: 1, x: 0 }}
-                            transition={{ delay: 0.7 + i * 0.1 }}
-                          >
-                            <span className="course-item__platform">{c.platform}</span>
-                            <span className="course-item__name">{c.name}</span>
-                          </motion.div>
-                        ))}
-                      </div>
-                    )}
-                    {result.reskillingPath.estimatedWeeks && (
-                      <p className="reskilling-weeks">
-                        Estimated duration: <strong>{result.reskillingPath.estimatedWeeks} weeks</strong>
                       </p>
                     )}
                   </motion.div>

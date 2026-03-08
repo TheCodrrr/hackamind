@@ -64,7 +64,7 @@ services:
       - redis
     environment:
       REDIS_URL: redis://redis:6379
-      SCRAPE_PAGES: 1
+      SCRAPE_PAGES: 3
       RATE_LIMIT_MS: 800
       SCRAPE_INTERVAL: 600
     restart: on-failure

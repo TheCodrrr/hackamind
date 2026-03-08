@@ -333,10 +333,24 @@ function HiringTab() {
       {summary && (
         <div className="stat-grid">
           <StatCard label="Total Postings" value={summary.current?.toLocaleString() || '—'} />
-          <StatCard label="Previous Period" value={summary.previous != null ? summary.previous.toLocaleString() : '—'} />
+          <StatCard label="Avg / Day" value={trends.length > 0 ? Math.round(trends.reduce((s, t) => s + t.count, 0) / trends.length).toLocaleString() : '—'} />
           <StatCard
-            label="Change"
-            value={summary.change != null ? `${summary.change > 0 ? '+' : ''}${summary.change}% ${summary.direction}` : 'No prior data'}
+            label="Trend"
+            value={(() => {
+              if (trends.length < 2) return 'Insufficient data';
+              const n = trends.length;
+              const sumX = n * (n - 1) / 2;
+              const sumX2 = n * (n - 1) * (2 * n - 1) / 6;
+              const sumY = trends.reduce((s, t) => s + t.count, 0);
+              const sumXY = trends.reduce((s, t, i) => s + i * t.count, 0);
+              const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+              const mean = sumY / n;
+              // Daily slope as % of mean, clamped to ±30 %
+              const raw = mean > 0 ? (slope / mean) * 100 : 0;
+              const pct = Math.round(Math.max(-30, Math.min(30, raw)));
+              const dir = pct >= 0 ? 'up' : 'down';
+              return `${pct > 0 ? '+' : ''}${pct}% ${dir}`;
+            })()}
             accent
           />
           <StatCard label="Cities Tracked" value={cities.length} />
@@ -778,7 +792,7 @@ function VulnerabilityTab() {
       </div>
 
       {/* Methodology */}
-      {methodology && (
+      {/* {methodology && (
         <div className="chart-box glass methodology">
           <h3>Methodology</h3>
           <p>{methodology.formula || 'Score = (Decline × 0.40) + (AI Mention Rate × 0.35) + (Displacement Ratio × 0.25)'}</p>
@@ -789,7 +803,7 @@ function VulnerabilityTab() {
             </div>
           )}
         </div>
-      )}
+      )} */}
     </TabWrapper>
   );
 }
